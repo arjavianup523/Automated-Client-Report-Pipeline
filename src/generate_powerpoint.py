@@ -1,3 +1,4 @@
+"""Generate an institutional portfolio PowerPoint report."""
 
 import sqlite3
 from pathlib import Path
@@ -9,6 +10,7 @@ from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN
 from pptx.enum.shapes import MSO_SHAPE
 
+
 ROOT = Path(__file__).resolve().parents[1]
 DB_PATH = ROOT / "data" / "reporting.db"
 OUTPUT_DIR = ROOT / "outputs"
@@ -19,16 +21,21 @@ LIGHT_BLUE = RGBColor(221, 235, 247)
 DARK = RGBColor(45, 45, 45)
 WHITE = RGBColor(255, 255, 255)
 GREEN = RGBColor(0, 120, 80)
+RED = RGBColor(180, 50, 50)
 
 
-def fetch_report_data():
+def fetch_report_data(client_id=1, fund_id=1, period_id=1):
+    """Fetch and validate report data for the selected records."""
     if not DB_PATH.exists():
-        raise FileNotFoundError(f"Reporting database not found: {DB_PATH}")
+        raise FileNotFoundError(
+            f"Reporting database not found: {DB_PATH}"
+        )
 
     with sqlite3.connect(DB_PATH) as connection:
         connection.row_factory = sqlite3.Row
 
-        summary = connection.execute("""
+        summary = connection.execute(
+            """
             SELECT
                 c.client_name AS client,
                 f.fund_name AS fund,
@@ -43,31 +50,85 @@ def fetch_report_data():
                 p.benchmark_return,
                 p.fund_return - p.benchmark_return AS active_return
             FROM clients c
-            JOIN funds f ON f.fund_id = 1
-            JOIN reporting_periods rp ON rp.period_id = 1
+            JOIN funds f ON f.fund_id = ?
+            JOIN reporting_periods rp ON rp.period_id = ?
             JOIN holdings h
                 ON h.fund_id = f.fund_id
                AND h.period_id = rp.period_id
             JOIN performance p
                 ON p.fund_id = f.fund_id
                AND p.period_id = rp.period_id
-            WHERE c.client_id = 1
+            WHERE c.client_id = ?
             GROUP BY
-                c.client_name, f.fund_name, f.benchmark_name,
-                f.base_currency, rp.period_start, rp.period_end,
-                p.fund_return, p.benchmark_return
-        """).fetchone()
+                c.client_name,
+                f.fund_name,
+                f.benchmark_name,
+                f.base_currency,
+                rp.period_start,
+                rp.period_end,
+                p.fund_return,
+                p.benchmark_return
+            """,
+            (fund_id, period_id, client_id),
+        ).fetchone()
 
-        holdings = connection.execute("""
-            SELECT security_id, security_name, sector,
-                   market_value, weight
+        holdings = connection.execute(
+            """
+            SELECT
+                security_id,
+                security_name,
+                sector,
+                market_value,
+                weight
             FROM holdings
-            WHERE fund_id = 1 AND period_id = 1
+            WHERE fund_id = ? AND period_id = ?
             ORDER BY market_value DESC
-        """).fetchall()
+            """,
+            (fund_id, period_id),
+        ).fetchall()
+
+        performance_count = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM performance
+            WHERE fund_id = ? AND period_id = ?
+            """,
+            (fund_id, period_id),
+        ).fetchone()[0]
 
     if summary is None or not holdings:
-        raise ValueError("Report generation blocked: required data is missing.")
+        raise ValueError(
+            "Report generation blocked: required data is missing."
+        )
+
+    if performance_count != 1:
+        raise ValueError(
+            "Report generation blocked: expected exactly one performance "
+            "record for the selected fund and period."
+        )
+
+    for holding in holdings:
+        market_value = holding["market_value"]
+        weight = holding["weight"]
+
+        if (
+            market_value is None
+            or isinstance(market_value, bool)
+            or market_value < 0
+        ):
+            raise ValueError(
+                f"Invalid market value for {holding['security_id']}."
+            )
+
+        if (
+            weight is None
+            or not isinstance(weight, (int, float))
+            or isinstance(weight, bool)
+            or not 0 <= weight <= 1
+        ):
+            raise ValueError(
+                f"Invalid portfolio weight for {holding['security_id']}."
+            )
 
     total_weight = sum(row["weight"] for row in holdings)
 
@@ -77,19 +138,14 @@ def fetch_report_data():
             f"{total_weight:.2%}, not 100%."
         )
 
-    for holding in holdings:
-        if holding["market_value"] is None or holding["market_value"] < 0:
-            raise ValueError(
-                f"Invalid market value for {holding['security_id']}."
-            )
-
     if summary["fund_return"] is None or summary["benchmark_return"] is None:
         raise ValueError("Report generation blocked: performance data is missing.")
 
-    return summary, holdings
+    return dict(summary), [dict(row) for row in holdings]
 
 
 def set_cell_text(cell, text, bold=False, color=DARK, size=12):
+    """Apply consistent formatting to a PowerPoint table cell."""
     cell.text = str(text)
     cell.vertical_anchor = 1
 
@@ -102,9 +158,14 @@ def set_cell_text(cell, text, bold=False, color=DARK, size=12):
 
 
 def add_footer(slide, slide_number):
+    """Add a fictional-data disclaimer and slide number."""
     box = slide.shapes.add_textbox(
-        Inches(0.5), Inches(7.12), Inches(12.2), Inches(0.2)
+        Inches(0.5),
+        Inches(7.12),
+        Inches(12.2),
+        Inches(0.2),
     )
+
     paragraph = box.text_frame.paragraphs[0]
     paragraph.text = (
         "CONFIDENTIALITY: Illustrative sample report — fictional data"
@@ -115,9 +176,14 @@ def add_footer(slide, slide_number):
 
 
 def add_title(slide, title, subtitle=None):
+    """Add a slide title and optional subtitle."""
     box = slide.shapes.add_textbox(
-        Inches(0.6), Inches(0.35), Inches(12), Inches(0.6)
+        Inches(0.6),
+        Inches(0.35),
+        Inches(12),
+        Inches(0.6),
     )
+
     paragraph = box.text_frame.paragraphs[0]
     paragraph.text = title
     paragraph.font.name = "Aptos Display"
@@ -127,46 +193,61 @@ def add_title(slide, title, subtitle=None):
 
     if subtitle:
         sub = slide.shapes.add_textbox(
-            Inches(0.65), Inches(0.98), Inches(12), Inches(0.35)
+            Inches(0.65),
+            Inches(0.98),
+            Inches(12),
+            Inches(0.35),
         )
-        p = sub.text_frame.paragraphs[0]
-        p.text = subtitle
-        p.font.size = Pt(11)
-        p.font.color.rgb = DARK
+
+        paragraph = sub.text_frame.paragraphs[0]
+        paragraph.text = subtitle
+        paragraph.font.size = Pt(11)
+        paragraph.font.color.rgb = DARK
 
 
 def add_metric_card(slide, x, y, width, label, value):
+    """Add a KPI card to a slide."""
     shape = slide.shapes.add_shape(
         MSO_SHAPE.ROUNDED_RECTANGLE,
-        Inches(x), Inches(y), Inches(width), Inches(1.15)
+        Inches(x),
+        Inches(y),
+        Inches(width),
+        Inches(1.15),
     )
+
     shape.fill.solid()
     shape.fill.fore_color.rgb = LIGHT_BLUE
     shape.line.color.rgb = BLUE
 
-    tf = shape.text_frame
-    tf.clear()
-    tf.margin_left = Inches(0.12)
-    tf.margin_right = Inches(0.12)
-    tf.vertical_anchor = 3
+    text_frame = shape.text_frame
+    text_frame.clear()
+    text_frame.margin_left = Inches(0.12)
+    text_frame.margin_right = Inches(0.12)
+    text_frame.vertical_anchor = 3
 
-    p = tf.paragraphs[0]
-    p.text = label
-    p.alignment = PP_ALIGN.CENTER
-    p.font.size = Pt(11)
-    p.font.color.rgb = DARK
+    paragraph = text_frame.paragraphs[0]
+    paragraph.text = label
+    paragraph.alignment = PP_ALIGN.CENTER
+    paragraph.font.size = Pt(11)
+    paragraph.font.color.rgb = DARK
 
-    p = tf.add_paragraph()
-    p.text = value
-    p.alignment = PP_ALIGN.CENTER
-    p.font.size = Pt(19)
-    p.font.bold = True
-    p.font.color.rgb = NAVY
+    paragraph = text_frame.add_paragraph()
+    paragraph.text = value
+    paragraph.alignment = PP_ALIGN.CENTER
+    paragraph.font.size = Pt(19)
+    paragraph.font.bold = True
+    paragraph.font.color.rgb = NAVY
 
 
-def generate_powerpoint():
+def generate_powerpoint(client_id=1, fund_id=1, period_id=1):
+    """Generate a four-slide portfolio report."""
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    summary, holdings = fetch_report_data()
+
+    summary, holdings = fetch_report_data(
+        client_id=client_id,
+        fund_id=fund_id,
+        period_id=period_id,
+    )
 
     presentation = Presentation()
     presentation.slide_width = Inches(13.333)
@@ -174,50 +255,62 @@ def generate_powerpoint():
 
     # Slide 1: Cover
     slide = presentation.slides.add_slide(presentation.slide_layouts[6])
-
-    background = slide.background
-    background.fill.solid()
-    background.fill.fore_color.rgb = NAVY
+    slide.background.fill.solid()
+    slide.background.fill.fore_color.rgb = NAVY
 
     title_box = slide.shapes.add_textbox(
-        Inches(0.9), Inches(1.6), Inches(11.5), Inches(1.2)
+        Inches(0.9),
+        Inches(1.6),
+        Inches(11.5),
+        Inches(1.2),
     )
-    p = title_box.text_frame.paragraphs[0]
-    p.text = "Institutional Portfolio Report"
-    p.font.name = "Aptos Display"
-    p.font.size = Pt(34)
-    p.font.bold = True
-    p.font.color.rgb = WHITE
+
+    paragraph = title_box.text_frame.paragraphs[0]
+    paragraph.text = "Institutional Portfolio Report"
+    paragraph.font.name = "Aptos Display"
+    paragraph.font.size = Pt(34)
+    paragraph.font.bold = True
+    paragraph.font.color.rgb = WHITE
 
     details = slide.shapes.add_textbox(
-        Inches(0.95), Inches(3.0), Inches(11), Inches(1.4)
+        Inches(0.95),
+        Inches(3.0),
+        Inches(11),
+        Inches(1.4),
     )
-    tf = details.text_frame
-    tf.text = f"Client: {summary['client']}"
-    tf.paragraphs[0].font.size = Pt(19)
-    tf.paragraphs[0].font.color.rgb = WHITE
 
-    p = tf.add_paragraph()
-    p.text = f"Fund: {summary['fund']}"
-    p.font.size = Pt(17)
-    p.font.color.rgb = WHITE
+    text_frame = details.text_frame
+    text_frame.text = f"Client: {summary['client']}"
+    text_frame.paragraphs[0].font.size = Pt(19)
+    text_frame.paragraphs[0].font.color.rgb = WHITE
 
-    p = tf.add_paragraph()
-    p.text = (
+    paragraph = text_frame.add_paragraph()
+    paragraph.text = f"Fund: {summary['fund']}"
+    paragraph.font.size = Pt(17)
+    paragraph.font.color.rgb = WHITE
+
+    paragraph = text_frame.add_paragraph()
+    paragraph.text = (
         f"Reporting period: {summary['period_start']} to "
         f"{summary['period_end']}"
     )
-    p.font.size = Pt(15)
-    p.font.color.rgb = WHITE
+    paragraph.font.size = Pt(15)
+    paragraph.font.color.rgb = WHITE
 
     disclaimer = slide.shapes.add_textbox(
-        Inches(0.95), Inches(6.65), Inches(11.5), Inches(0.3)
+        Inches(0.95),
+        Inches(6.65),
+        Inches(11.5),
+        Inches(0.3),
     )
-    p = disclaimer.text_frame.paragraphs[0]
-    p.text = "Illustrative portfolio data — not actual client or fund reporting"
-    p.font.size = Pt(11)
-    p.font.italic = True
-    p.font.color.rgb = WHITE
+
+    paragraph = disclaimer.text_frame.paragraphs[0]
+    paragraph.text = (
+        "Illustrative portfolio data — not actual client or fund reporting"
+    )
+    paragraph.font.size = Pt(11)
+    paragraph.font.italic = True
+    paragraph.font.color.rgb = WHITE
 
     # Slide 2: Executive summary
     slide = presentation.slides.add_slide(presentation.slide_layouts[6])
@@ -228,20 +321,21 @@ def generate_powerpoint():
 
     add_metric_card(
         slide, 0.7, 1.7, 3.7, "PORTFOLIO VALUE",
-        f"{currency} {market_value:,.0f}"
+        f"{currency} {market_value:,.0f}",
     )
     add_metric_card(
         slide, 4.8, 1.7, 3.7, "HOLDINGS",
-        str(summary["number_of_holdings"])
+        str(summary["number_of_holdings"]),
     )
     add_metric_card(
         slide, 8.9, 1.7, 3.7, "PORTFOLIO WEIGHT",
-        f"{summary['total_weight']:.2%}"
+        f"{summary['total_weight']:.2%}",
     )
 
     table = slide.shapes.add_table(
         4, 2, Inches(1.5), Inches(3.5), Inches(10.2), Inches(2.0)
     ).table
+
     table.columns[0].width = Inches(4.4)
     table.columns[1].width = Inches(5.8)
 
@@ -252,11 +346,11 @@ def generate_powerpoint():
         ("Active return", f"{summary['active_return']:.2%}"),
     ]
 
-    for r, (label, value) in enumerate(rows):
-        set_cell_text(table.cell(r, 0), label, bold=True, size=13)
-        set_cell_text(table.cell(r, 1), value, size=13)
-        table.cell(r, 0).fill.solid()
-        table.cell(r, 0).fill.fore_color.rgb = LIGHT_BLUE
+    for row_index, (label, value) in enumerate(rows):
+        set_cell_text(table.cell(row_index, 0), label, bold=True, size=13)
+        set_cell_text(table.cell(row_index, 1), value, size=13)
+        table.cell(row_index, 0).fill.solid()
+        table.cell(row_index, 0).fill.fore_color.rgb = LIGHT_BLUE
 
     add_footer(slide, 2)
 
@@ -265,8 +359,12 @@ def generate_powerpoint():
     add_title(slide, "Portfolio Holdings", "Security-level exposure")
 
     table = slide.shapes.add_table(
-        len(holdings) + 1, 4,
-        Inches(0.55), Inches(1.6), Inches(12.2), Inches(4.7)
+        len(holdings) + 1,
+        4,
+        Inches(0.55),
+        Inches(1.6),
+        Inches(12.2),
+        Inches(4.7),
     ).table
 
     widths = [1.5, 4.3, 2.8, 1.7]
@@ -274,10 +372,17 @@ def generate_powerpoint():
         table.columns[index].width = Inches(width)
 
     headers = ["Security ID", "Security Name", "Sector", "Weight"]
-    for col, header in enumerate(headers):
-        set_cell_text(table.cell(0, col), header, bold=True, color=WHITE, size=11)
-        table.cell(0, col).fill.solid()
-        table.cell(0, col).fill.fore_color.rgb = NAVY
+
+    for column, header in enumerate(headers):
+        set_cell_text(
+            table.cell(0, column),
+            header,
+            bold=True,
+            color=WHITE,
+            size=11,
+        )
+        table.cell(0, column).fill.solid()
+        table.cell(0, column).fill.fore_color.rgb = NAVY
 
     for row_index, holding in enumerate(holdings, start=1):
         values = [
@@ -286,21 +391,28 @@ def generate_powerpoint():
             holding["sector"],
             f"{holding['weight']:.2%}",
         ]
-        for col, value in enumerate(values):
-            set_cell_text(table.cell(row_index, col), value, size=10)
+
+        for column, value in enumerate(values):
+            set_cell_text(table.cell(row_index, column), value, size=10)
+
             if row_index % 2 == 0:
-                table.cell(row_index, col).fill.solid()
-                table.cell(row_index, col).fill.fore_color.rgb = LIGHT_BLUE
+                table.cell(row_index, column).fill.solid()
+                table.cell(row_index, column).fill.fore_color.rgb = LIGHT_BLUE
 
     note = slide.shapes.add_textbox(
-        Inches(0.65), Inches(6.45), Inches(12), Inches(0.35)
+        Inches(0.65),
+        Inches(6.45),
+        Inches(12),
+        Inches(0.35),
     )
-    p = note.text_frame.paragraphs[0]
-    p.text = (
+
+    paragraph = note.text_frame.paragraphs[0]
+    paragraph.text = (
         "Weights are checked against a 100% portfolio total before report creation."
     )
-    p.font.size = Pt(10)
-    p.font.italic = True
+    paragraph.font.size = Pt(10)
+    paragraph.font.italic = True
+
     add_footer(slide, 3)
 
     # Slide 4: Performance interpretation
@@ -316,36 +428,42 @@ def generate_powerpoint():
     )
     add_metric_card(
         slide, 4.85, 1.8, 3.6, "BENCHMARK RETURN",
-        f"{benchmark_return:.2%}"
+        f"{benchmark_return:.2%}",
     )
     add_metric_card(
         slide, 8.9, 1.8, 3.6, "ACTIVE RETURN", f"{active_return:.2%}"
     )
 
     interpretation = slide.shapes.add_textbox(
-        Inches(1.0), Inches(3.6), Inches(11.2), Inches(1.5)
+        Inches(1.0),
+        Inches(3.6),
+        Inches(11.2),
+        Inches(1.5),
     )
-    tf = interpretation.text_frame
-    tf.word_wrap = True
 
-    p = tf.paragraphs[0]
+    text_frame = interpretation.text_frame
+    text_frame.word_wrap = True
+    paragraph = text_frame.paragraphs[0]
+
     if active_return > 0:
-        p.text = (
+        paragraph.text = (
             f"The fund outperformed its benchmark by {active_return:.2%} "
             "over the selected reporting period."
         )
     elif active_return < 0:
-        p.text = (
+        paragraph.text = (
             f"The fund underperformed its benchmark by {abs(active_return):.2%} "
             "over the selected reporting period."
         )
     else:
-        p.text = "The fund return matched the benchmark over the selected period."
+        paragraph.text = (
+            "The fund return matched the benchmark over the selected period."
+        )
 
-    p.font.size = Pt(20)
-    p.font.color.rgb = GREEN if active_return >= 0 else RGBColor(180, 50, 50)
+    paragraph.font.size = Pt(20)
+    paragraph.font.color.rgb = GREEN if active_return >= 0 else RED
 
-    caveat = tf.add_paragraph()
+    caveat = text_frame.add_paragraph()
     caveat.text = (
         "Active return is calculated as fund return minus benchmark return. "
         "It is not a measure of risk-adjusted performance."
@@ -355,12 +473,9 @@ def generate_powerpoint():
 
     add_footer(slide, 4)
 
-    filename = (
-        "client_report_"
-        + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        + ".pptx"
-    )
-    output_path = OUTPUT_DIR / filename
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    output_path = OUTPUT_DIR / f"client_report_{timestamp}.pptx"
+
     presentation.save(output_path)
 
     print(f"PowerPoint report created: {output_path}")
